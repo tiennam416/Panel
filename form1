@@ -1,0 +1,695 @@
+using Guna.UI2.WinForms;
+using System.IO;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace LKT_VN
+{
+    public partial class Form1 : Form
+    {
+        #region DLL Imports
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetCursorInfo(ref CURSORINFO pci);
+        #endregion
+
+        #region Constants & Structs
+        private const int WH_KEYBOARD_LL = 13;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int VK_LBUTTON = 0x01;
+        private const int RELEASE_DELAY = 50;
+        private const int OFFSET_READ = 0x494;
+        private const int OFFSET_WRITE = 0x44;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct CURSORINFO
+        {
+            public int cbSize;
+            public int flags;
+            public IntPtr hCursor;
+            public System.Drawing.Point ptScreenPos;
+        }
+
+        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+        #endregion
+
+        #region Variables
+        private IntPtr hookID = IntPtr.Zero;
+        private LowLevelKeyboardProc hookCallback;
+        private Guna2Button waitingForKeyButton = null;
+
+        // Dictionary lưu key binding và action tương ứng
+        private Dictionary<Guna2Button, Keys> keyBindings = new Dictionary<Guna2Button, Keys>();
+        private Dictionary<Guna2Button, Action> keyActions = new Dictionary<Guna2Button, Action>();
+
+        private MemoryPatch memory;
+        private CancellationTokenSource _aimbotCts;
+        private List<long> _addresses;
+        private bool _isInitialized = false;
+        private int _processId = -1;
+        private bool _isAimbotRunning = false;
+        #endregion
+
+        public Form1()
+        {
+            InitializeComponent();
+            InitMemoryPatch();
+
+            hookCallback = HookCallback;
+            hookID = SetHook(hookCallback);
+            System.Windows.Forms.Application.ApplicationExit += Application_ApplicationExit;
+
+            InitializeKeyBindings();
+
+            this.Size = new Size(700, 450);
+        }
+
+        #region Initialization
+        private void InitializeKeyBindings()
+        {
+            // Đăng ký các hotkey
+            RegisterHotkey(guna2Button4, "Aimbot", () => ToggleAimbot());
+
+            // Thêm các hotkey khác nếu cần
+            // RegisterHotkey(guna2Button5, "Chức năng khác", () => SomeOtherFunction());
+        }
+
+        private void InitMemoryPatch()
+        {
+            try
+            {
+                memory = new MemoryPatch("HD-Player");
+                var proc = Process.GetProcessesByName("HD-Player").FirstOrDefault();
+                if (proc != null) _processId = proc.Id;
+                UpdateStatus("Đã kết nối HD-Player");
+            }
+            catch
+            {
+                UpdateStatus("Lỗi: Không tìm thấy HD-Player");
+            }
+        }
+        #endregion
+
+        #region Aimbot Core Functions
+        private void ToggleAimbot()
+        {
+            StopAimbot();
+
+            StartAimbot();
+        }
+
+        private bool IsCursorHidden()
+        {
+            CURSORINFO cursorInfo = new CURSORINFO();
+            cursorInfo.cbSize = Marshal.SizeOf(cursorInfo);
+
+            if (GetCursorInfo(ref cursorInfo))
+            {
+                return cursorInfo.flags == 0;
+            }
+            return false;
+        }
+
+        private bool IsProcessAlive()
+        {
+            try
+            {
+                if (_processId != -1)
+                {
+                    var proc = Process.GetProcessById(_processId);
+                    return !proc.HasExited;
+                }
+                var processes = Process.GetProcessesByName("HD-Player");
+                if (processes.Length > 0)
+                {
+                    _processId = processes[0].Id;
+                    return true;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        private bool ScanPattern()
+        {
+            try
+            {
+                UpdateStatus("Đang scan...");
+                AimBotBtn.Enabled = false;
+
+                if (!IsProcessAlive())
+                {
+                    UpdateStatus("Không tìm thấy HD-Player!");
+                    AimBotBtn.Enabled = true;
+                    return false;
+                }
+
+                if (memory == null)
+                {
+                    memory = new MemoryPatch("HD-Player");
+                    var proc = Process.GetProcessesByName("HD-Player").FirstOrDefault();
+                    if (proc != null) _processId = proc.Id;
+                }
+
+                string pattern = "01 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 00 00 00 00 00 00 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 00 00 00 00 ?? ?? ?? ?? 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 00 00 00 00 00 00 00 00 00 00 00 00 ?? ?? ?? ?? ?? ?? ?? ?? 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 80 BF";
+
+                var scanTask = Task.Run(() => memory.AoBScanMultiPattern(
+                    new[] { pattern },
+                    startAddress: 0x0000000000010000,
+                    endAddress: 0x00007ffffffeffff,
+                    customChunkSize: 0x800000
+                ));
+
+                if (!scanTask.Wait(TimeSpan.FromSeconds(30)))
+                    throw new TimeoutException("Scan timeout");
+
+                var results = scanTask.Result;
+                _addresses = results.TryGetValue(pattern, out var list) ? list : new List<long>();
+
+                if (_addresses == null || _addresses.Count == 0)
+                {
+                    UpdateStatus("Không tìm thấy địa chỉ!");
+                    _isInitialized = false;
+                    AimBotBtn.Enabled = true;
+                    return false;
+                }
+                else
+                {
+                    _isInitialized = true;
+                    UpdateStatus($"Tìm thấy {_addresses.Count} địa chỉ");
+                    AimBotBtn.Enabled = true;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"Scan lỗi: {ex.Message}");
+                _isInitialized = false;
+                AimBotBtn.Enabled = true;
+                return false;
+            }
+        }
+
+        private void StartAimbot()
+        {
+            if (_aimbotCts != null && !_aimbotCts.IsCancellationRequested) return;
+
+            if (!IsProcessAlive())
+            {
+                UpdateStatus("Lỗi: Không tìm thấy HD-Player");
+                return;
+            }
+
+            if (memory == null)
+            {
+                try
+                {
+                    memory = new MemoryPatch("HD-Player");
+                    var proc = Process.GetProcessesByName("HD-Player").FirstOrDefault();
+                    if (proc != null) _processId = proc.Id;
+                }
+                catch
+                {
+                    UpdateStatus("Lỗi: Không thể kết nối");
+                    return;
+                }
+            }
+
+            if (!_isInitialized || _addresses == null || _addresses.Count == 0)
+            {
+                UpdateStatus("Đang scan tự động...");
+                if (!ScanPattern())
+                {
+                    MessageBox.Show("Scan thất bại! Vui lòng kiểm tra game đã mở chưa.", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+
+            _aimbotCts = new CancellationTokenSource();
+            _isAimbotRunning = true;
+            Task.Run(() => AimbotLoop(_aimbotCts.Token));
+            UpdateStatus("Aimbot đang chạy...");
+            AimBotBtn.Text = "Tắt Aimbot";
+        }
+
+        private void StopAimbot()
+        {
+            _aimbotCts?.Cancel();
+            _aimbotCts = null;
+            _addresses?.Clear();
+            _isAimbotRunning = false;
+            UpdateStatus("Aimbot đã dừng");
+            AimBotBtn.Text = "Bật Aimbot";
+        }
+
+        int delay = 0;
+        Random rand = new Random(); // Khởi tạo một lần ở ngoài hàm
+
+        void UpdateDelayWithRandom()
+        {
+            int baseDelay = DelayTrackBar.Value;
+
+            // Tạo hệ số ngẫu nhiên từ 0.5 đến 1.5 (tương đương +-50%)
+            double randomMultiplier = 0.5 + (rand.NextDouble() * 1.0);
+
+            // Gán giá trị vào biến delay
+            delay = (int)(baseDelay * randomMultiplier);
+        }
+
+        private void AimbotLoop(CancellationToken token)
+        {
+            var patchAddresses = _addresses
+                .Select(addr => new { ReadAddr = addr + OFFSET_READ, WriteAddr = addr + OFFSET_WRITE })
+                .ToList();
+
+            while (!token.IsCancellationRequested)
+            {
+                if (!IsProcessAlive())
+                {
+                    UpdateStatus("Mất kết nối! Đang chờ kết nối lại...");
+                    while (!IsProcessAlive() && !token.IsCancellationRequested)
+                        Thread.Sleep(1000);
+
+                    if (token.IsCancellationRequested) break;
+                    try
+                    {
+                        memory?.Dispose();
+                        memory = new MemoryPatch("HD-Player");
+                        UpdateStatus("Đã kết nối lại!");
+                    }
+                    catch
+                    {
+                        UpdateStatus("Không thể kết nối lại!");
+                        break;
+                    }
+                }
+
+                while (!token.IsCancellationRequested)
+                {
+                    bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                    bool isCursorHidden = IsCursorHidden();
+
+                    if (isLeftButtonDown && isCursorHidden)
+                        break;
+
+                    Thread.Sleep(1);
+                }
+
+                if (token.IsCancellationRequested) break;
+
+                UpdateDelayWithRandom();
+
+                for (int i = 0; i < delay && !token.IsCancellationRequested; i++)
+                {
+                    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0 || !IsCursorHidden())
+                        goto WaitForRelease;
+                    Thread.Sleep(1);
+                }
+
+                if (token.IsCancellationRequested) break;
+
+                while (!token.IsCancellationRequested)
+                {
+                    bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                    bool isCursorHidden = IsCursorHidden();
+
+                    if (!isLeftButtonDown || !isCursorHidden)
+                        break;
+
+                    if (!IsProcessAlive())
+                    {
+                        UpdateStatus("Mất kết nối!");
+                        goto WaitForRelease;
+                    }
+
+                    var values = new List<(long writeAddr, int value)>();
+                    foreach (var p in patchAddresses)
+                    {
+                        try
+                        {
+                            values.Add((p.WriteAddr, memory.ReadMemory<int>(p.ReadAddr)));
+                        }
+                        catch { }
+                    }
+
+                    foreach (var (writeAddr, value) in values)
+                    {
+                        try { memory.WriteMemory(writeAddr, value); }
+                        catch { }
+                    }
+
+                    int shdelay = rand.Next(2, 20);
+                    Thread.Sleep(shdelay);
+                }
+
+            WaitForRelease:
+                while (!token.IsCancellationRequested)
+                {
+                    bool isLeftButtonDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                    bool isCursorHidden = IsCursorHidden();
+
+                    if (!isLeftButtonDown || !isCursorHidden)
+                        break;
+
+                    Thread.Sleep(1);
+                }
+
+                if (!token.IsCancellationRequested)
+                {
+                    for (int i = 0; i < RELEASE_DELAY && !token.IsCancellationRequested; i++)
+                        Thread.Sleep(1);
+                }
+                Thread.Sleep(1);
+            }
+
+            _isAimbotRunning = false;
+            UpdateStatus("Aimbot đã dừng");
+
+            if (InvokeRequired)
+            {
+                Invoke(new Action(() =>
+                {
+                    AimBotBtn.Text = "Bật Aimbot";
+                    AimBotBtn.Enabled = true;
+                }));
+            }
+            else
+            {
+                AimBotBtn.Text = "Bật Aimbot";
+                AimBotBtn.Enabled = true;
+            }
+        }
+        #endregion
+
+        #region UI Update
+        private void UpdateStatus(string text)
+        {
+            if (InvokeRequired)
+            {
+                Invoke(new Action(() => UpdateStatus(text)));
+                return;
+            }
+
+            Status.Text = "Status : " + text;
+        }
+        #endregion
+
+        #region Event Handlers
+        private void DelayTrackBar_ValueChanged(object sender, EventArgs e)
+        {
+            DelayTxT.Text = DelayTrackBar.Value.ToString();
+        }
+
+        private void guna2ControlBox1_Click(object sender, EventArgs e)
+        {
+            System.Windows.Forms.Application.Exit();
+        }
+
+        private void AimBotBtn_Click(object sender, EventArgs e)
+        {
+            ToggleAimbot();
+        }        
+
+        private void Application_ApplicationExit(object sender, EventArgs e)
+        {
+            UnhookWindowsHookEx(hookID);
+        }
+
+        // Sự kiện click cho button để set hotkey
+        private void guna2Button4_Click(object sender, EventArgs e)
+        {
+            Guna2Button button = sender as Guna2Button;
+            if (button != null)
+            {
+                waitingForKeyButton = button;
+                button.Text = "...";
+            }
+        }
+        #endregion
+
+        #region Hotkey Binding
+        private IntPtr SetHook(LowLevelKeyboardProc proc)
+        {
+            using (Process curProcess = Process.GetCurrentProcess())
+            using (ProcessModule curModule = curProcess.MainModule)
+            {
+                return SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(curModule.ModuleName), 0);
+            }
+        }
+
+        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+            {
+                int vkCode = Marshal.ReadInt32(lParam);
+                Keys key = (Keys)vkCode;
+
+                // ƯU TIÊN XỬ LÝ GÁN PHÍM TRƯỚC
+                if (waitingForKeyButton != null)
+                {
+                    // Assign Key to Selected Button
+                    if (key == Keys.Escape)
+                    {
+                        keyBindings[waitingForKeyButton] = Keys.None;
+                        UpdateButtonText(waitingForKeyButton);
+                    }
+                    else
+                    {
+                        keyBindings[waitingForKeyButton] = key;
+                        UpdateButtonText(waitingForKeyButton);
+                    }
+                    waitingForKeyButton = null;
+
+                    // QUAN TRỌNG: Không thực thi action khi đang gán phím
+                    return CallNextHookEx(hookID, nCode, wParam, lParam);
+                }
+
+                // CHỈ KHI KHÔNG ĐANG GÁN PHÍM MỚI KIỂM TRA VÀ THỰC THI ACTION
+                // Check which key is pressed
+                foreach (var kvp in keyBindings)
+                {
+                    if (kvp.Value == key)
+                    {
+                        Guna2Button button = kvp.Key;
+                        if (keyActions.ContainsKey(button))
+                        {
+                            // Execute the action
+                            keyActions[button]?.Invoke();
+                        }
+                        break;
+                    }
+                }
+            }
+            return CallNextHookEx(hookID, nCode, wParam, lParam);
+        }
+
+        private void UpdateButtonText(Guna2Button button)
+        {
+            if (button != null)
+            {
+                Keys key = keyBindings.ContainsKey(button) ? keyBindings[button] : Keys.None;
+                button.Text = key == Keys.None ? "None" : key.ToString();
+            }
+        }
+
+        // Public methods để quản lý hotkey từ bên ngoài
+        public void RegisterHotkey(Guna2Button button, string displayName, Action action)
+        {
+            if (!keyBindings.ContainsKey(button))
+            {
+                keyBindings[button] = Keys.None;
+                keyActions[button] = action;
+                button.Tag = displayName; // Lưu tên hiển thị để dùng sau nếu cần
+                button.Text = "None";
+            }
+        }
+
+        public void UnregisterHotkey(Guna2Button button)
+        {
+            if (keyBindings.ContainsKey(button))
+            {
+                keyBindings.Remove(button);
+                keyActions.Remove(button);
+                button.Text = "None";
+            }
+        }
+
+        public Keys GetHotkey(Guna2Button button)
+        {
+            return keyBindings.ContainsKey(button) ? keyBindings[button] : Keys.None;
+        }
+
+        public void SetHotkey(Guna2Button button, Keys key)
+        {
+            if (keyBindings.ContainsKey(button))
+            {
+                keyBindings[button] = key;
+                UpdateButtonText(button);
+            }
+        }
+        #endregion
+
+
+        // Sửa lại Form1_FormClosing để cleanup cả sniper
+        private void Form1_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            _aimbotCts?.Cancel();
+            memory?.Dispose();
+        }
+
+        private void SniperTrackDelay_ValueChanged(object sender, EventArgs e)
+        {
+            DelaySniperTxT.Text = SniperTrackDelay.Value.ToString();
+        }
+
+        private void guna2Button1_Click(object sender, EventArgs e)
+        {
+            AIMTAB.Visible = true;
+            SniperTab.Visible = false;
+        }
+
+        private void guna2Button2_Click(object sender, EventArgs e)
+        {
+            SniperTab.Visible = true;
+            AIMTAB.Visible = false;
+        }
+
+        private void Form1_Load(object sender, EventArgs e)
+        {
+            AIMTAB.BringToFront();
+            SniperTab.Location = new(216, 66);
+            AIMTAB.Location = new(216, 66);
+        }
+
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, int processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
+
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, IntPtr dwSize, uint flAllocationType, uint flProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out IntPtr lpNumberOfBytesWritten);
+
+        [DllImport("kernel32.dll")]
+        static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttribute, IntPtr dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, IntPtr lpThreadId);
+
+        const uint PROCESS_CREATE_THREAD = 0x2;
+        const uint PROCESS_QUERY_INFORMATION = 0x400;
+        const uint PROCESS_VM_OPERATION = 0x8;
+        const uint PROCESS_VM_WRITE = 0x20;
+        const uint PROCESS_VM_READ = 0x10;
+
+        const uint MEM_COMMIT = 0x1000;
+        const uint PAGE_READWRITE = 4;       
+
+        public void InjectDLL(string processName, string dllResourceName)
+        {
+            try
+            {                     
+                
+                string tempDllPath = Path.Combine(Path.GetTempPath(), dllResourceName);              
+
+
+                Process[] targetProcesses = Process.GetProcessesByName(processName);
+                if (targetProcesses.Length == 0)
+                {
+                    Console.WriteLine($"Waiting for {processName}.exe...");
+                }
+                else
+                {
+                    Process targetProcess = targetProcesses[0];
+                    IntPtr hProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, false, targetProcess.Id);
+
+                    IntPtr loadLibraryAddr = GetProcAddress(GetModuleHandle("kernel32.dll"), "LoadLibraryA");
+                    IntPtr allocMemAddress = VirtualAllocEx(hProcess, IntPtr.Zero, (IntPtr)tempDllPath.Length, MEM_COMMIT, PAGE_READWRITE);
+
+                    IntPtr bytesWritten;
+                    WriteProcessMemory(hProcess, allocMemAddress, System.Text.Encoding.ASCII.GetBytes(tempDllPath), (uint)tempDllPath.Length, out bytesWritten);
+
+                    CreateRemoteThread(hProcess, IntPtr.Zero, IntPtr.Zero, loadLibraryAddr, allocMemAddress, 0, IntPtr.Zero);
+
+                    Console.Beep(240, 300);
+                    //Type Here Chams Is Already Injected or code invaible
+                    UpdateStatus("cham done");
+
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"Injection failed: {ex.Message}");                
+            }
+        }
+
+        private async void ChamsRed_Click(object sender, EventArgs e)
+        {
+            try            {
+                
+                string tempPath = Path.GetTempPath();
+                string dllPath = Path.Combine(tempPath, "ChamsRed.dll");
+
+                if(!File.Exists(dllPath))
+                {
+                    string downloadUrl = "https://raw.githubusercontent.com/tiennam416/Panel/refs/heads/main/ChamsRed.dll";
+
+                    
+                    using (WebClient client = new WebClient())
+                    {
+                        
+                        client.DownloadProgressChanged += (s, e) =>
+                        {
+                            
+                        };
+
+                        
+                        await client.DownloadFileTaskAsync(new Uri(downloadUrl), dllPath);
+                    }
+
+                    // 4. Kiểm tra file đã tồn tại
+                    if (File.Exists(dllPath))
+                    {
+                        MessageBox.Show($"Đã tải DLL thành công vào: {dllPath}");
+                        
+                    }
+                    else
+                    {
+                        MessageBox.Show("Tải file thất bại!");
+                        return;
+                    }                   
+                }
+                InjectDLL("HD-Player", "ChamsRed.dll");
+            }                
+            
+            catch (Exception ex)
+            {
+                UpdateStatus($"Lỗi: {ex.Message}");
+            }
+        }
+    }
+}
